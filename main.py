@@ -9,7 +9,9 @@ import json
 import requests
 
 app = Flask(__name__)
-CORS(app)
+
+# ✅ FIX: Allow all origins so Netlify frontend can reach this backend
+CORS(app, origins="*")
 
 SUPPORTED_PATTERNS = [
     r'(https?://)?(www\.)?instagram\.com/(reel|p|tv|stories)/',
@@ -21,7 +23,6 @@ SUPPORTED_PATTERNS = [
     r'(https?://)?(www\.)?tiktok\.com/',
 ]
 
-# Platform-specific headers for proxying
 PROXY_HEADERS = {
     'Twitter/X': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -48,6 +49,7 @@ PROXY_HEADERS = {
     }
 }
 
+
 def detect_platform(url):
     if 'instagram.com' in url: return 'Instagram'
     if 'youtube.com' in url or 'youtu.be' in url: return 'YouTube'
@@ -57,8 +59,10 @@ def detect_platform(url):
     if 'tiktok.com' in url: return 'TikTok'
     return 'Unknown'
 
+
 def is_supported_url(url):
     return any(re.search(p, url) for p in SUPPORTED_PATTERNS)
+
 
 def get_ydl_opts(platform):
     base_opts = {
@@ -73,7 +77,8 @@ def get_ydl_opts(platform):
             'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['mweb', 'ios'],
+                    # ✅ Use tv_embedded + web as fallback clients to avoid bot-detection
+                    'player_client': ['tv_embedded', 'mweb', 'ios'],
                     'player_skip': ['webpage'],
                 }
             },
@@ -162,17 +167,14 @@ def download():
             if not video_url:
                 return jsonify({"error": "Could not extract video URL. The video may be private or unavailable."}), 400
 
-            title = info.get('title', f'{platform} Video')
+            title     = info.get('title', f'{platform} Video')
             thumbnail = info.get('thumbnail', '')
-            duration = info.get('duration', 0)
-            uploader = info.get('uploader', '') or info.get('channel', '')
+            duration  = info.get('duration', 0)
+            uploader  = info.get('uploader', '') or info.get('channel', '')
 
-            # For platforms that block direct browser access (Twitter, Instagram, etc.)
-            # return a proxy URL instead of the raw CDN URL
             needs_proxy = platform in ['Twitter/X', 'Instagram', 'Facebook', 'Pinterest']
 
             if needs_proxy:
-                # Encode the video URL and platform so /api/proxy can fetch it server-side
                 import urllib.parse
                 proxy_url = f"/api/proxy?url={urllib.parse.quote(video_url)}&platform={urllib.parse.quote(platform)}"
                 download_url = proxy_url
@@ -192,12 +194,13 @@ def download():
 
     except yt_dlp.utils.DownloadError as e:
         err = str(e)
+
         if platform == 'YouTube' and ('Sign in' in err or 'bot' in err.lower() or 'cookies' in err.lower()):
             fallback = try_cobalt_fallback(url)
             if fallback:
                 return jsonify(fallback)
             return jsonify({
-                "error": "YouTube is blocking this server. Please try again in a minute."
+                "error": "YouTube is blocking this server right now. Please try again in a minute."
             }), 503
 
         if 'Private' in err or 'Login' in err or 'Sign in' in err:
@@ -216,34 +219,32 @@ def download():
 @app.route('/api/proxy')
 def proxy_video():
     """
-    Streams a video from a CDN URL server-side with the correct headers.
-    This fixes the 403 error for Twitter, Instagram, Facebook, Pinterest
-    because browsers can't add Referer/Origin headers to cross-origin requests.
+    Streams a video from a CDN URL server-side with correct headers.
+    Fixes 403 errors for Twitter, Instagram, Facebook, Pinterest.
     """
     video_url = request.args.get('url', '').strip()
-    platform = request.args.get('platform', 'default').strip()
+    platform  = request.args.get('platform', 'default').strip()
 
     if not video_url:
         return jsonify({"error": "No URL provided"}), 400
 
-    # Only allow proxying known video CDN domains for security
     allowed_domains = [
-        'video.twimg.com',       # Twitter
-        'cdninstagram.com',      # Instagram
+        'video.twimg.com',
+        'cdninstagram.com',
         'instagram.com',
-        'fbcdn.net',             # Facebook
+        'fbcdn.net',
         'facebook.com',
-        'pinimg.com',            # Pinterest
+        'pinimg.com',
         'pinterest.com',
-        'googlevideo.com',       # YouTube
+        'googlevideo.com',
         'youtube.com',
         'youtu.be',
         'ytimg.com',
-        'tiktokcdn.com',         # TikTok
+        'tiktokcdn.com',
     ]
 
     from urllib.parse import urlparse
-    parsed = urlparse(video_url)
+    parsed   = urlparse(video_url)
     hostname = parsed.hostname or ''
 
     if not any(domain in hostname for domain in allowed_domains):
@@ -251,8 +252,11 @@ def proxy_video():
 
     headers = PROXY_HEADERS.get(platform, PROXY_HEADERS['default'])
 
+    # ✅ Support Range requests so browsers can seek inside video
+    if 'Range' in request.headers:
+        headers['Range'] = request.headers['Range']
+
     try:
-        # Stream the video through our server
         resp = requests.get(
             video_url,
             headers=headers,
@@ -260,29 +264,33 @@ def proxy_video():
             timeout=30
         )
 
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 206):
             return jsonify({"error": f"CDN returned {resp.status_code}"}), resp.status_code
 
-        content_type = resp.headers.get('Content-Type', 'video/mp4')
+        content_type   = resp.headers.get('Content-Type', 'video/mp4')
         content_length = resp.headers.get('Content-Length')
 
         response_headers = {
             'Content-Type': content_type,
             'Content-Disposition': 'attachment; filename="saveall_video.mp4"',
             'Accept-Ranges': 'bytes',
+            # ✅ Allow the Netlify frontend to access this response
+            'Access-Control-Allow-Origin': '*',
         }
         if content_length:
             response_headers['Content-Length'] = content_length
+        if resp.headers.get('Content-Range'):
+            response_headers['Content-Range'] = resp.headers['Content-Range']
 
         def generate():
-            for chunk in resp.iter_content(chunk_size=1024 * 64):  # 64KB chunks
+            for chunk in resp.iter_content(chunk_size=1024 * 64):
                 if chunk:
                     yield chunk
 
         return Response(
             stream_with_context(generate()),
             headers=response_headers,
-            status=200
+            status=resp.status_code
         )
 
     except requests.exceptions.Timeout:
