@@ -14,7 +14,6 @@ SUPPORTED_PATTERNS = [
     r'(https?://)?(www\.)?pinterest\.(com|in)/',
     r'(https?://)?(www\.)?twitter\.com/',
     r'(https?://)?(www\.)?x\.com/',
-    r'(https?://)?(www\.)?tiktok\.com/',
 ]
 
 def detect_platform(url):
@@ -23,7 +22,6 @@ def detect_platform(url):
     if 'facebook.com' in url or 'fb.watch' in url: return 'Facebook'
     if 'pinterest.com' in url or 'pinterest.in' in url: return 'Pinterest'
     if 'twitter.com' in url or 'x.com' in url: return 'Twitter/X'
-    if 'tiktok.com' in url: return 'TikTok'
     return 'Unknown'
 
 def is_supported_url(url):
@@ -31,7 +29,7 @@ def is_supported_url(url):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "SaveAll backend running ✅", "supports": ["Instagram","YouTube","Facebook","Pinterest","Twitter/X","TikTok"]})
+    return jsonify({"status": "SaveAll backend running"})
 
 @app.route('/api/download', methods=['POST'])
 def download():
@@ -41,7 +39,7 @@ def download():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not is_supported_url(url):
-        return jsonify({"error": "URL not supported. Paste a link from Instagram, YouTube, Facebook, or Pinterest."}), 400
+        return jsonify({"error": "URL not supported."}), 400
 
     platform = detect_platform(url)
 
@@ -52,14 +50,9 @@ def download():
         'noplaylist': True,
     }
 
-    # YouTube: offer multiple qualities
-    if platform == 'YouTube':
-        ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-
             video_url = info.get('url')
             title = info.get('title', f'{platform} Video')
             thumbnail = info.get('thumbnail', '')
@@ -76,7 +69,7 @@ def download():
                     if any_fmt:
                         video_url = any_fmt[-1]['url']
                     else:
-                        return jsonify({"error": "Could not extract video. It may be private or age-restricted."}), 400
+                        return jsonify({"error": "Could not extract video."}), 400
 
             return jsonify({
                 "success": True,
@@ -86,18 +79,10 @@ def download():
                 "thumbnail": thumbnail,
                 "duration": duration,
                 "uploader": uploader,
-                "filename": f"saveall_{platform.lower()}_video.mp4"
             })
 
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e)
-        if 'Private' in err or 'Login' in err or 'Sign in' in err:
-            return jsonify({"error": f"This {platform} video is private or requires login. Only public videos work."}), 403
-        if 'age' in err.lower():
-            return jsonify({"error": "This video is age-restricted and cannot be downloaded."}), 403
-        return jsonify({"error": "Could not fetch video. Make sure the link is correct and the video is public."}), 400
     except Exception as e:
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
